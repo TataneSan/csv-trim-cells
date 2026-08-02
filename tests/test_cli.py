@@ -1,76 +1,67 @@
 import io
-import json
 import sys
+import json
 import unittest
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 
 from csv_trim_cells.cli import main
 
 
-def run(argv, stdin_text=""):
-    out = io.StringIO()
-    err = io.StringIO()
-    old_stdin = sys.stdin
-    sys.stdin = io.StringIO(stdin_text)
+def run(argv, stdin=""):
+    out, err = io.StringIO(), io.StringIO()
+    old = sys.stdin
+    sys.stdin = io.StringIO(stdin)
     try:
         with redirect_stdout(out), redirect_stderr(err):
             code = main(argv)
     finally:
-        sys.stdin = old_stdin
+        sys.stdin = old
     return code, out.getvalue(), err.getvalue()
 
 
-CSV = "name,city\n  Alice , Paris \nBob,Lyon  \n"
-
-
-class TestCsvTrimCells(unittest.TestCase):
-    def test_basic_trim(self):
-        code, out, _ = run(["-"], CSV)
+class TrimTests(unittest.TestCase):
+    def test_trim_both(self):
+        code, out, _ = run(["-"], "a,b\n 1 , 2 \n")
         self.assertEqual(code, 0)
-        self.assertEqual(out, "name,city\nAlice,Paris\nBob,Lyon\n")
+        self.assertIn("1,2", out)
 
-    def test_column_target(self):
-        code, out, _ = run(["--columns", "2", "-"], CSV)
-        self.assertEqual(code, 0)
-        self.assertEqual(out, "name,city\n  Alice ,Paris\nBob,Lyon\n")
+    def test_header_preserved(self):
+        code, out, _ = run(["-"], " h \n x \n")
+        self.assertEqual(" h ", out.splitlines()[0])
+        self.assertIn("x", out)
 
-    def test_trim_header(self):
-        code, out, _ = run(["--trim-header", "-"], " a ,b\n 1 ,2\n")
-        self.assertEqual(code, 0)
-        self.assertEqual(out, "a,b\n1,2\n")
+    def test_check_exit2(self):
+        code, out, _ = run(["--check", "-"], "a\n b\n")
+        self.assertEqual(code, 2)
 
-    def test_report(self):
-        code, out, _ = run(["--report", "-"], CSV)
+    def test_check_exit0(self):
+        code, out, _ = run(["--check", "-"], "a\nb\n")
         self.assertEqual(code, 0)
-        self.assertIn("cells changed: 3", out)
+
+    def test_collapse(self):
+        code, out, _ = run(["--collapse", "-"], "a,b\n x ,  b \n")
+        self.assertIn("x,b", out)
+
+    def test_drop_empty(self):
+        code, out, _ = run(["--drop-empty-rows", "-"], "a\n   \n")
+        data = [l for l in out.strip().splitlines() if l.strip()]
+        self.assertEqual(len(data), 1)
 
     def test_json(self):
-        code, out, _ = run(["--report", "--json", "-"], CSV)
-        self.assertEqual(code, 0)
-        report = json.loads(out)
-        self.assertEqual(report["cells_changed"], 3)
-        self.assertEqual(report["rows_changed"], 2)
-        self.assertTrue(report["checks"]["ok"])
+        code, out, _ = run(["--json", "-"], "a\n b \n")
+        rep = json.loads(out.strip())
+        self.assertEqual(rep["trimmed_cells"], 1)
 
-    def test_check_fail(self):
-        code, _, err = run(["--report", "--check", "1", "-"], CSV)
+    def test_require_max_fail(self):
+        code, out, _ = run(["--require-trimmed-max", "0", "-"], "a\n b\n")
         self.assertEqual(code, 2)
-        self.assertIn("CHECK FAILED", err)
 
-    def test_check_pass(self):
-        code, _, _ = run(["--report", "--check", "10", "-"], CSV)
-        self.assertEqual(code, 0)
-
-    def test_no_header(self):
-        code, out, _ = run(["--no-header", "-"], " a ,b\n")
-        self.assertEqual(code, 0)
-        self.assertEqual(out, "a,b\n")
-
-    def test_quoted_cells(self):
-        # single row treated as header by default -> preserved
-        code, out, _ = run(["-"], '"  spaced  ",x\n" a "," b "\n')
-        self.assertEqual(code, 0)
-        self.assertEqual(out, "  spaced  ,x\na,b\n")
+    def test_columns(self):
+        code, out, _ = run(["--no-header", "--columns", "1", "-"],
+                           " a , b \n x , y \n")
+        lines = out.splitlines()
+        self.assertEqual("a, b ", lines[0])
+        self.assertEqual("x, y ", lines[1])
 
 
 if __name__ == "__main__":

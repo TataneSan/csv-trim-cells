@@ -1,4 +1,4 @@
-"""Module entry point for ``python -m csv_trim_cells``."""
+"""Module entry point."""
 
 import sys
 

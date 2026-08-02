@@ -1,78 +1,56 @@
 # csv-trim-cells
 
-Strip leading and trailing whitespace from cells of a CSV file, with
-per-column targeting and CI-friendly threshold checks.
+Trim leading/trailing whitespace in CSV cells, with optional internal
+whitespace collapse, column filtering and CI-friendly checks.
 
-By default every data cell is trimmed; the header row is preserved unless
-`--trim-header` is passed. Trimming happens on parsed values, so quoted
-fields are unquoted/requoted cleanly by the CSV writer.
+## Features
 
-## Installation
+- Trims both, left or right side of every cell (`--side`)
+- Preserves the header row by default (`--trim-header` to include it)
+- Column filtering by name or 1-based index (`--columns`)
+- Collapse internal whitespace runs to a single space (`--collapse`)
+- Drop rows that become entirely empty (`--drop-empty-rows`)
+- CI mode: `--check` exits 2 when any cell would change
+- Machine-readable `--json` report
+- Reads stdin when the file is omitted or `-`
+
+## Install
 
 ```sh
 pip install .
-```
-
-Or run directly:
-
-```sh
-python -m csv_trim_cells --help
+# or directly
+pip install git+https://github.com/TataneSan/csv-trim-cells.git
 ```
 
 ## Usage
 
-```
-csv-trim-cells [INPUT] [options]
-```
-
-`INPUT` is a CSV file path. When omitted or `-`, input is read from stdin.
-
-### Options
-
-| Option | Description |
-| --- | --- |
-| `--columns LIST` | Comma-separated 1-based column indexes to trim (default: all). |
-| `--no-header` | Treat the first row as data. |
-| `--trim-header` | Also trim the header row. |
-| `--delimiter CHAR` | Field delimiter (default `,`). Use `\t` for tab. |
-| `--report` | Emit only the change report, not the trimmed CSV. |
-| `--check MAX_CHANGED` | Exit 2 if more than MAX_CHANGED cells were trimmed. |
-| `--json` | Emit the report as JSON. |
-
-### Exit codes
-
-- `0` — success (or all checks passed)
-- `1` — CLI / I/O / parse error
-- `2` — a `--check` threshold was exceeded
-
-## Examples
-
-Trim whitespace from all cells:
-
 ```sh
-$ printf 'name,city\n  Alice , Paris \nBob,Lyon  \n' | csv-trim-cells -
-name,city
-Alice,Paris
-Bob,Lyon
+# Trim all cells (header preserved)
+csv-trim-cells data.csv
+
+# Semicolon-separated input, collapse internal spaces
+csv-trim-cells --delimiter ';' --collapse data.csv
+
+# Only trim columns 1 and 3, drop fully-empty rows
+csv-trim-cells --columns 1,3 --drop-empty-rows data.csv
+
+# CI: fail if anything would be trimmed
+csv-trim-cells --check data.csv
+
+# JSON report without writing the CSV
+csv-trim-cells --json data.csv
+
+# From stdin
+cat data.csv | csv-trim-cells -
 ```
 
-Trim only the second column:
+## Exit codes
 
-```sh
-$ csv-trim-cells data.csv --columns 2
-```
-
-Report only, useful in scripts:
-
-```sh
-$ csv-trim-cells data.csv --report --json | jq '.cells_changed'
-```
-
-CI guard — fail if anyone committed sloppy whitespace:
-
-```sh
-$ csv-trim-cells data.csv --check 0 || echo "whitespace found in CSV"
-```
+| Code | Meaning |
+|------|---------|
+| 0 | success (or `--check` with nothing to trim) |
+| 1 | I/O or CLI usage error |
+| 2 | `--check` found cells to trim, or `--require-trimmed-max` failed |
 
 ## License
 

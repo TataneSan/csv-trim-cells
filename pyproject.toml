@@ -5,11 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "csv-trim-cells"
 version = "1.0.0"
-description = "Strip leading/trailing whitespace from CSV cells (per-column, CI checks, JSON)"
+description = "Trim whitespace in CSV cells (header aware, column-filtered, CI-friendly)"
 readme = "README.md"
-authors = [{name = "TataneSan"}]
-license = {text = "MIT"}
 requires-python = ">=3.9"
+license = {text = "MIT"}
+keywords = ["csv", "trim", "whitespace", "cli", "ci"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
 
 [project.scripts]
 csv-trim-cells = "csv_trim_cells.cli:main"
