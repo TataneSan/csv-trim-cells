@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
-"""csv-trim-cells - strip surrounding whitespace from CSV cells.
+"""csv-trim-cells: strip leading/trailing whitespace from CSV cells.
 
-Reads CSV from files or stdin and trims leading/trailing whitespace in
-every cell (header included) or only in selected columns --columns.
-Useful before diffing or deduplicating exported spreadsheets.
+By default all whitespace (spaces, tabs) at the start and end of every
+data cell is removed. Header trimming is optional. Fields that were
+quoted in the input keep their inner content; trimming happens on the
+parsed value.
 
 Exit codes:
-    0 - success
-    1 - CLI or I/O error
-    2 - --check mode: at least one cell needed trimming (nothing written)
+    0 - success (or check passed)
+    1 - CLI / I/O error
+    2 - check mode: threshold not satisfied
 """
 
 import argparse
@@ -18,145 +18,152 @@ import json
 import sys
 
 
-def read_source(path):
-    if path in (None, "-"):
-        return "<stdin>", sys.stdin
-    return path, open(path, "r", encoding="utf-8", newline="")
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="csv-trim-cells",
+        description=(
+            "Strip leading and trailing whitespace from cells of a CSV. "
+            "Reads a file or stdin when the path is omitted or '-'."
+        ),
+    )
+    p.add_argument("input", nargs="?", default="-",
+                   help="CSV input path (default: stdin; '-' = stdin)")
+    p.add_argument("--columns", default=None,
+                   help="Comma-separated 1-based column indexes to trim "
+                        "(default: all columns)")
+    p.add_argument("--no-header", action="store_true",
+                   help="Treat the first row as data (no header row)")
+    p.add_argument("--trim-header", action="store_true",
+                   help="Also trim the header row")
+    p.add_argument("--delimiter", default=",",
+                   help="Field delimiter (default: ','). Use '\\t' for tab.")
+    p.add_argument("--report", action="store_true",
+                   help="Do not emit the trimmed CSV; emit only the report "
+                        "of how many cells were changed")
+    p.add_argument("--check", metavar="MAX_CHANGED", type=int, default=None,
+                   help="Exit 2 if the number of trimmed cells exceeds "
+                        "MAX_CHANGED")
+    p.add_argument("--json", action="store_true",
+                   help="Emit the report as JSON (default: human-readable text)")
+    return p
 
 
-def resolve_columns(header, columns):
-    if not columns:
-        return None  # all
-    stripped = [h.strip() for h in header]
-    idxs = []
-    for col in columns:
-        if col.lstrip("-").isdigit():
-            idxs.append(int(col))
-        else:
-            if col not in stripped:
-                raise ValueError("column not found: %s" % col)
-            idxs.append(stripped.index(col))
-    return idxs
+def open_input(path):
+    if path == "-":
+        return sys.stdin
+    return open(path, "r", newline="", encoding="utf-8")
 
 
-def process(reader, writer, columns):
-    header = next(reader, None)
-    if header is None:
-        return 0
-    idxs = resolve_columns(header, columns)
-    trimmed = 0
-
-    def clean(row):
-        nonlocal trimmed
-        for i in range(len(row)):
-            if idxs is not None and i not in idxs:
-                continue
-            stripped = row[i].strip()
-            if stripped != row[i]:
-                trimmed += 1
-                row[i] = stripped
-        return row
-
-    writer.writerow(clean(header))
-    for row in reader:
-        writer.writerow(clean(row))
-    return trimmed
+def parse_columns(spec):
+    cols = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            n = int(part)
+        except ValueError:
+            return None
+        if n < 1:
+            return None
+        cols.add(n - 1)
+    return cols
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(
-        prog="csv-trim-cells",
-        description="Trim leading/trailing whitespace from CSV cells.",
-    )
-    parser.add_argument(
-        "files", nargs="*", metavar="FILE",
-        help="CSV files; reads stdin when omitted or '-'",
-    )
-    parser.add_argument(
-        "-c", "--columns", metavar="COL", nargs="+", default=None,
-        help="only trim these column names / 0-based indexes",
-    )
-    parser.add_argument(
-        "--check", action="store_true",
-        help="exit 2 when any cell needs trimming; no CSV written",
-    )
-    parser.add_argument(
-        "-o", "--output", metavar="FILE",
-        help="write CSV to FILE instead of stdout (single input only)",
-    )
-    parser.add_argument(
-        "--json", action="store_true",
-        help="emit a JSON summary report",
-    )
-    args = parser.parse_args(argv)
-
-    if args.output and len(args.files) != 1:
-        print("csv-trim-cells: --output requires exactly one input file",
-              file=sys.stderr)
+    args = build_parser().parse_args(argv)
+    delim = args.delimiter
+    if delim == "\\t":
+        delim = "\t"
+    if len(delim) != 1:
+        print("error: --delimiter must be a single character", file=sys.stderr)
         return 1
 
-    files = args.files or ["-"]
-    rc = 0
-    results = []
-    dirty = False
+    target_cols = None
+    if args.columns:
+        target_cols = parse_columns(args.columns)
+        if target_cols is None:
+            print("error: --columns must be comma-separated positive integers",
+                  file=sys.stderr)
+            return 1
 
-    if args.check or args.json:
-        for path in files:
-            try:
-                name, fh = read_source(path)
-            except OSError as exc:
-                print("csv-trim-cells: %s: %s" % (path, exc), file=sys.stderr)
-                rc = 1
+    try:
+        fh = open_input(args.input)
+    except OSError as exc:
+        print("error: cannot open input: %s" % exc, file=sys.stderr)
+        return 1
+
+    rows_read = 0
+    cells_changed = 0
+    rows_changed = 0
+    out_buf = io.StringIO()
+    writer = csv.writer(out_buf, delimiter=delim, lineterminator="\n")
+
+    close = fh is not sys.stdin
+    try:
+        reader = csv.reader(fh, delimiter=delim)
+        first = True
+        for row in reader:
+            is_header_row = first and not args.no_header
+            first = False
+            if is_header_row and not args.trim_header:
+                writer.writerow(row)
                 continue
-            try:
-                reader = csv.reader(fh)
-                writer = csv.writer(io.StringIO())
-                trimmed = process(reader, writer, args.columns)
-            except ValueError as exc:
-                print("csv-trim-cells: %s: %s" % (path, exc), file=sys.stderr)
-                rc = 1
-                if path not in (None, "-"):
-                    fh.close()
-                continue
-            if path not in (None, "-"):
-                fh.close()
-            dirty = dirty or trimmed > 0
-            results.append({"file": name, "trimmed_cells": trimmed})
-    else:
-        out_fh = open(args.output, "w", encoding="utf-8", newline="") \
-            if args.output else sys.stdout
-        for path in files:
-            try:
-                name, fh = read_source(path)
-            except OSError as exc:
-                print("csv-trim-cells: %s: %s" % (path, exc), file=sys.stderr)
-                rc = 1
-                continue
-            try:
-                reader = csv.reader(fh)
-                writer = csv.writer(out_fh)
-                trimmed = process(reader, writer, args.columns)
-            except ValueError as exc:
-                print("csv-trim-cells: %s: %s" % (path, exc), file=sys.stderr)
-                rc = 1
-                if path not in (None, "-"):
-                    fh.close()
-                continue
-            if path not in (None, "-"):
-                fh.close()
-            dirty = dirty or trimmed > 0
-            results.append({"file": name, "trimmed_cells": trimmed})
-        if args.output:
-            out_fh.close()
+            rows_read += 1
+            row_changed = False
+            new_row = []
+            for i, cell in enumerate(row):
+                if target_cols is not None and i not in target_cols:
+                    new_row.append(cell)
+                    continue
+                trimmed = cell.strip()
+                if trimmed != cell:
+                    cells_changed += 1
+                    row_changed = True
+                new_row.append(trimmed)
+            if row_changed:
+                rows_changed += 1
+            writer.writerow(new_row)
+    except csv.Error as exc:
+        print("error: CSV parse error: %s" % exc, file=sys.stderr)
+        return 1
+    finally:
+        if close:
+            fh.close()
+
+    failures = []
+    if args.check is not None and cells_changed > args.check:
+        failures.append("cells_changed %d > max %d" % (cells_changed, args.check))
+
+    report = {
+        "input": args.input,
+        "rows_read": rows_read,
+        "rows_changed": rows_changed,
+        "cells_changed": cells_changed,
+        "columns": sorted(c + 1 for c in target_cols) if target_cols else "all",
+        "checks": {"ok": not failures, "failures": failures},
+    }
 
     if args.json:
-        payload = results[0] if len(results) == 1 else results
-        json.dump(payload, sys.stdout, indent=2)
+        json.dump(report, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
+        if not args.report:
+            sys.stdout.write(out_buf.getvalue())
+    elif args.report:
+        print("input:         %s" % args.input)
+        print("rows read:     %d" % rows_read)
+        print("rows changed:  %d" % rows_changed)
+        print("cells changed: %d" % cells_changed)
+        if failures:
+            for f in failures:
+                print("CHECK FAILED: %s" % f, file=sys.stderr)
+    else:
+        sys.stdout.write(out_buf.getvalue())
+        if failures:
+            for f in failures:
+                print("CHECK FAILED: %s" % f, file=sys.stderr)
 
-    if args.check and rc == 0:
-        return 2 if dirty else 0
-    return rc
+    return 2 if failures else 0
 
 
 if __name__ == "__main__":
