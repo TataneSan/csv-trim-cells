@@ -1,67 +1,84 @@
 import io
 import sys
-import json
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
 
-from csv_trim_cells.cli import main
-
-
-def run(argv, stdin=""):
-    out, err = io.StringIO(), io.StringIO()
-    old = sys.stdin
-    sys.stdin = io.StringIO(stdin)
-    try:
-        with redirect_stdout(out), redirect_stderr(err):
-            code = main(argv)
-    finally:
-        sys.stdin = old
-    return code, out.getvalue(), err.getvalue()
+from csv_trim_cells.cli import clean_cell, main, process_rows
 
 
-class TrimTests(unittest.TestCase):
-    def test_trim_both(self):
-        code, out, _ = run(["-"], "a,b\n 1 , 2 \n")
-        self.assertEqual(code, 0)
-        self.assertIn("1,2", out)
-
-    def test_header_preserved(self):
-        code, out, _ = run(["-"], " h \n x \n")
-        self.assertEqual(" h ", out.splitlines()[0])
-        self.assertIn("x", out)
-
-    def test_check_exit2(self):
-        code, out, _ = run(["--check", "-"], "a\n b\n")
-        self.assertEqual(code, 2)
-
-    def test_check_exit0(self):
-        code, out, _ = run(["--check", "-"], "a\nb\n")
-        self.assertEqual(code, 0)
+class CleanCellTest(unittest.TestCase):
+    def test_strip(self):
+        self.assertEqual(clean_cell("  hello  "), ("hello", True))
+        self.assertEqual(clean_cell("hello"), ("hello", False))
 
     def test_collapse(self):
-        code, out, _ = run(["--collapse", "-"], "a,b\n x ,  b \n")
-        self.assertIn("x,b", out)
+        self.assertEqual(clean_cell("a   b\t c", collapse=True), ("a b c", True))
+        self.assertEqual(clean_cell("a b", collapse=True), ("a b", False))
+        # without collapse, internal runs are kept
+        self.assertEqual(clean_cell("a   b"), ("a   b", False))
 
-    def test_drop_empty(self):
-        code, out, _ = run(["--drop-empty-rows", "-"], "a\n   \n")
-        data = [l for l in out.strip().splitlines() if l.strip()]
-        self.assertEqual(len(data), 1)
 
-    def test_json(self):
-        code, out, _ = run(["--json", "-"], "a\n b \n")
-        rep = json.loads(out.strip())
-        self.assertEqual(rep["trimmed_cells"], 1)
+class ProcessRowsTest(unittest.TestCase):
+    def test_per_column_counts(self):
+        rows = [["name", "city"], [" Alice ", " Paris "], ["Bob", "Lyon"]]
+        cleaned, per_col, total = process_rows(rows)
+        self.assertEqual(cleaned[1], ["Alice", "Paris"])
+        self.assertEqual(total, 2)
+        self.assertEqual(per_col, {"name": 1, "city": 1})
 
-    def test_require_max_fail(self):
-        code, out, _ = run(["--require-trimmed-max", "0", "-"], "a\n b\n")
-        self.assertEqual(code, 2)
 
-    def test_columns(self):
-        code, out, _ = run(["--no-header", "--columns", "1", "-"],
-                           " a , b \n x , y \n")
-        lines = out.splitlines()
-        self.assertEqual("a, b ", lines[0])
-        self.assertEqual("x, y ", lines[1])
+class MainTest(unittest.TestCase):
+    def _run(self, text, argv):
+        old_in, old_out = sys.stdin, sys.stdout
+        sys.stdin = io.StringIO(text)
+        sys.stdout = io.StringIO()
+        try:
+            rc = main(argv)
+            out = sys.stdout.getvalue()
+        finally:
+            sys.stdin, sys.stdout = old_in, old_out
+        return rc, out
+
+    def test_trims_and_writes(self):
+        rc, out = self._run("name, city \n Alice , Paris \n", ["-q", "-"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "name,city\nAlice,Paris\n")
+
+    def test_check_exit_codes(self):
+        dirty = "name,age\n Alice , 42 \n"
+        clean = "name,age\nAlice,42\n"
+        self.assertEqual(self._run(dirty, ["--check", "-q", "-"])[0], 2)
+        self.assertEqual(self._run(clean, ["--check", "-q", "-"])[0], 0)
+
+    def test_check_does_not_rewrite(self):
+        rc, out = self._run("a, b\n1, 2\n", ["--check", "--json", "-"])
+        self.assertEqual(rc, 2)
+        self.assertNotIn("a,b\n1,2\n", out)
+
+    def test_json_report(self):
+        rc, out = self._run("name, city \n Alice , Paris \n",
+                            ["--json", "--check", "-"])
+        self.assertEqual(rc, 2)
+        import json
+        report = json.loads(out)
+        self.assertEqual(report["changed_cells"], 3)
+        self.assertEqual(report["columns"], {"name": 1, "city": 2})
+
+    def test_semicolon_delimiter(self):
+        rc, out = self._run("a; b \n 1 ; 2 \n", ["-q", "-"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "a;b\n1;2\n")
+
+    def test_collapse_flag(self):
+        rc, out = self._run("note\na    b\n", ["--collapse", "-q", "-"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "note\na b\n")
+
+    def test_empty_input(self):
+        self.assertEqual(self._run("", ["-q", "-"])[0], 0)
+        self.assertEqual(self._run("  \n", ["--check", "-q", "-"])[0], 0)
+
+    def test_missing_file(self):
+        self.assertEqual(main(["-q", "/nonexistent/nope.csv"]), 1)
 
 
 if __name__ == "__main__":

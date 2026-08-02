@@ -1,57 +1,104 @@
 # csv-trim-cells
 
-Trim leading/trailing whitespace in CSV cells, with optional internal
-whitespace collapse, column filtering and CI-friendly checks.
+**Trim leading/trailing whitespace from every cell of a CSV file.**
+
+Messy exports often carry stray spaces around values (`" Paris "`, `"42 "`),
+which break joins, lookups, and comparisons downstream. csv-trim-cells sniffs
+the delimiter, cleans every cell, and rewrites the file — or lints it in CI.
 
 ## Features
 
-- Trims both, left or right side of every cell (`--side`)
-- Preserves the header row by default (`--trim-header` to include it)
-- Column filtering by name or 1-based index (`--columns`)
-- Collapse internal whitespace runs to a single space (`--collapse`)
-- Drop rows that become entirely empty (`--drop-empty-rows`)
-- CI mode: `--check` exits 2 when any cell would change
-- Machine-readable `--json` report
-- Reads stdin when the file is omitted or `-`
+- Auto-detects the delimiter (`,`, `;`, tab, `|`) with a comma fallback
+- Strips leading/trailing whitespace from every cell
+- `--collapse`: reduce internal whitespace runs to a single space
+- `--check`: lint mode — exit 2 if any cell had extra whitespace (no rewrite)
+- `--json`: machine-readable report of modified cells grouped by column
+- Reads a file or stdin (`-`); pure standard library
 
-## Install
+## Installation
 
 ```sh
 pip install .
-# or directly
+# or
 pip install git+https://github.com/TataneSan/csv-trim-cells.git
 ```
 
 ## Usage
 
 ```sh
-# Trim all cells (header preserved)
-csv-trim-cells data.csv
+# Clean a file, write the trimmed CSV to stdout
+csv-trim-cells data.csv > clean.csv
 
-# Semicolon-separated input, collapse internal spaces
-csv-trim-cells --delimiter ';' --collapse data.csv
-
-# Only trim columns 1 and 3, drop fully-empty rows
-csv-trim-cells --columns 1,3 --drop-empty-rows data.csv
-
-# CI: fail if anything would be trimmed
-csv-trim-cells --check data.csv
-
-# JSON report without writing the CSV
-csv-trim-cells --json data.csv
+# In-place style (via a temp file)
+csv-trim-cells data.csv > data.tmp && mv data.tmp data.csv
 
 # From stdin
 cat data.csv | csv-trim-cells -
+
+# Also collapse internal whitespace runs
+csv-trim-cells --collapse notes.csv > notes-clean.csv
+
+# CI lint gate: fail if any cell still has extra whitespace
+csv-trim-cells --check dirty.csv
+
+# JSON report of modified cells per column
+csv-trim-cells --json data.csv
+```
+
+### Example
+
+Given `dirty.csv`:
+
+```csv
+name, city ,score
+ Alice ," Paris ", 42
+Bob,Lyon ,  37
+```
+
+```sh
+csv-trim-cells dirty.csv
+```
+
+```csv
+name,city,score
+Alice,Paris,42
+Bob,Lyon,37
+```
+
+(Values parsed from quotes are trimmed too — leading/trailing whitespace is
+removed from every cell. Use `--collapse` to squeeze internal runs as well.)
+
+### JSON output
+
+```json
+{
+  "changed_cells": 5,
+  "collapse": false,
+  "columns": {
+    "city": 2,
+    "name": 1,
+    "score": 2
+  },
+  "delimiter": ",",
+  "file": "dirty.csv",
+  "rows": 3
+}
 ```
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | success (or `--check` with nothing to trim) |
-| 1 | I/O or CLI usage error |
-| 2 | `--check` found cells to trim, or `--require-trimmed-max` failed |
+| `0`  | Success (file rewritten, or `--check` found nothing to trim) |
+| `1`  | I/O or CLI error |
+| `2`  | `--check` was given and at least one cell had extra whitespace |
+
+## Development
+
+```sh
+python3 -m unittest discover -s tests -v
+```
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
